@@ -12,14 +12,16 @@
 
   枠壁: 0〜4mm  /  ピースくり抜き: 深さ 2mm  /  境界リッジ: 0.5mm 盛り上がり  /  接続タブ: 4mm 貫通
 
-組み合わせると ~421 × 213 mm の一体枠（鳥取県の 西部／中部／東部 で分割）:
+等倍（1/300,000）では全体 ~421 × 213 mm を鳥取県の 西部／中部／東部 に 3 分割し、
+タブ/スロットで接続する:
   [ seibu ~152mm ] | [ chubu ~137mm ] | [ tobu ~145mm ]
 
+1/2・1/3 では全体が 1 枚のベッドに収まるため分割せず一体で出力する。
+
 Usage:
-  python3 scripts/gen_frame.py                  # 全セクション
-  python3 scripts/gen_frame.py frame_seibu
-  python3 scripts/gen_frame.py frame_chubu
-  python3 scripts/gen_frame.py frame_tobu
+  python3 scripts/gen_frame.py                        # 全縮尺・全セクション
+  python3 scripts/gen_frame.py --scale 300k           # 等倍のみ
+  python3 scripts/gen_frame.py --scale 300k seibu     # 縮尺とセクションを指定
 """
 
 import json, math, os, struct, sys
@@ -27,13 +29,12 @@ from collections import defaultdict
 import numpy as np
 from PIL import Image, ImageDraw
 from scipy.ndimage import binary_dilation
+from scales import (SCALES, BASE_XY_SCALE, parse_scale_arg,
+                    PROJ_CENTER_LAT, PROJ_CENTER_LON, METERS_PER_DEGREE)
 
 # ── 座標変換定数（gen_stl.py と一致させること） ────────────────────────────
-PROJ_CENTER_LAT = 35.35
-PROJ_CENTER_LON = 133.83
-METERS_PER_DEGREE = 111320.0
 COS_CENTER = math.cos(PROJ_CENTER_LAT * math.pi / 180)
-XY_SCALE = 1.5 / 450
+XY_SCALE = BASE_XY_SCALE   # set_scale() で縮尺ごとに差し替える
 PREF_BBOX = dict(minLon=132.90, maxLon=134.70, minLat=34.90, maxLat=35.80)
 
 # ── フレーム仕様 ────────────────────────────────────────────────────────────
@@ -42,7 +43,12 @@ BASE_HEIGHT  = 2.0   # ピース受け底面の高さ (mm); ポケット深さ =
 RIDGE_HEIGHT = 0.5   # 市町村境界線の盛り上がり高さ (mm)
 CLEARANCE    = 0.3   # ピースくり抜きクリアランス (mm)
 MARGIN       = 3.0   # 外周マージン (mm)
-PX_SIZE      = 0.5   # ラスタ解像度 (mm/px)
+RIDGE_WIDTH  = 0.5   # 市町村境界線の幅 (mm)
+PX_SIZE      = 0.5   # ラスタ解像度 (mm/px)。set_scale() で縮尺ごとに差し替える
+
+# 上記のうち FRAME_THICK / BASE_HEIGHT / RIDGE_HEIGHT / RIDGE_WIDTH / CLEARANCE /
+# MARGIN / タブ寸法は印刷のための物理寸法なので、全縮尺で共通にしている。
+# 縮尺で変わるのは XY_SCALE（地図の縮尺）と PX_SIZE（ラスタ解像度）だけ。
 
 # ── タブ接続仕様 ────────────────────────────────────────────────────────────
 TAB_D_MM   = 5.0     # タブの奥行き (mm, x 方向)
@@ -50,12 +56,13 @@ TAB_H_MM   = 15.0    # タブの高さ (mm, y 方向)
 GAP_H_MM   = 10.0    # タブ間の隙間 (mm)
 TAB_CLR_MM = 0.3     # スロットのクリアランス (mm, 上下各辺)
 
-# ── セクション境界 x 座標 (mm) ──────────────────────────────────────────────
+# ── セクション境界 x 座標 (mm, 等倍基準) ────────────────────────────────────
 # 西部の東端（大山町 -67.1mm）と中部の東端（三朝町 +64.3mm）のそれぞれ 1mm 外側。
 # これにより西部・中部の全ピースは各セクション内に収まり、
 # 境界をまたぐのは鳥取市（中部側に約 30mm）と琴浦町（西部側に約 16mm）のみ。
-SEAM1_X_MM = -66.0   # 西部／中部 境界
-SEAM2_X_MM = +65.5   # 中部／東部 境界
+# 他の縮尺ではこの値を縮尺比で換算する。
+SEAM1_X_MM_BASE = -66.0   # 西部／中部 境界
+SEAM2_X_MM_BASE = +65.5   # 中部／東部 境界
 
 # ── 市町村コード ────────────────────────────────────────────────────────────
 SEIBU_CODES = [   # 西部（米子市・境港市・西伯郡・日野郡）
@@ -69,23 +76,21 @@ TOBU_CODES = [    # 東部（鳥取市・岩美郡・八頭郡）
 ]
 ALL_CODES = SEIBU_CODES + CHUBU_CODES + TOBU_CODES
 
-SECTIONS = {
-    'frame_seibu': {
-        'label': '西部（米子市・境港市・西伯郡・日野郡）',
-        'seam_left':  None,
-        'seam_right': SEAM1_X_MM,
-    },
-    'frame_chubu': {
-        'label': '中部（倉吉市・東伯郡）',
-        'seam_left':  SEAM1_X_MM,
-        'seam_right': SEAM2_X_MM,
-    },
-    'frame_tobu': {
-        'label': '東部（鳥取市・岩美郡・八頭郡）',
-        'seam_left':  SEAM2_X_MM,
-        'seam_right': None,
-    },
+SECTION_LABELS = {
+    'seibu': '西部（米子市・境港市・西伯郡・日野郡）',
+    'chubu': '中部（倉吉市・東伯郡）',
+    'tobu':  '東部（鳥取市・岩美郡・八頭郡）',
+    'all':   '鳥取県全体（分割なし）',
 }
+
+
+def set_scale(scale_key):
+    """縮尺に応じて XY_SCALE と PX_SIZE を切り替える。"""
+    global XY_SCALE, PX_SIZE
+    sc = SCALES[scale_key]
+    XY_SCALE = sc['xy_scale']
+    PX_SIZE  = sc['px_size']
+    return sc
 
 STL_TRI = np.dtype([('n','<3f4'),('v0','<3f4'),('v1','<3f4'),('v2','<3f4'),('a','<u2')])
 
@@ -213,6 +218,12 @@ def compute_municipality_mask(codes, boundary_dir, g_x_min, g_y_min, g_h,
     for dr, dc in [(-1, 0), (+1, 0), (0, -1), (0, +1)]:
         shifted = padded[1+dr:1+dr+h, 1+dc:1+dc+section_w]
         ridge_mask |= (label_map > 0) & (shifted > 0) & (label_map != shifted)
+
+    # リッジを物理幅 RIDGE_WIDTH まで太らせる（細かい PX_SIZE でも線幅を保つ）
+    ridge_px = max(1, round(RIDGE_WIDTH / PX_SIZE))
+    if ridge_px > 1:
+        ridge_mask = binary_dilation(ridge_mask,
+                                     structure=np.ones((ridge_px, ridge_px), dtype=bool))
 
     # クリアランス拡張（ポケットのみ）
     clr_px = max(1, round(CLEARANCE / PX_SIZE))
@@ -433,17 +444,12 @@ def _quad(dr, dc, xi0, xi1, yi0, yi1, zt, zb):
     return np.concatenate([t1, t2])
 
 
-def main():
-    args = sys.argv[1:]
-    keys = args if args else list(SECTIONS.keys())
-    for key in keys:
-        if key not in SECTIONS:
-            print(f'不明なセクション: {key}  (有効: {list(SECTIONS.keys())})')
-            sys.exit(1)
+def gen_scale(scale_key, section_keys, base_dir, manifest):
+    sc = set_scale(scale_key)
+    print(f'\n########## 縮尺 {sc["label"]}（{sc["note"]}）  PX_SIZE={PX_SIZE}mm ##########')
 
-    base_dir     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     boundary_dir = os.path.join(base_dir, 'public', 'data', 'boundary')
-    out_dir      = os.path.join(base_dir, 'public', 'data', 'stl')
+    out_dir      = os.path.join(base_dir, 'public', 'data', 'stl', scale_key)
     os.makedirs(out_dir, exist_ok=True)
 
     # ── グローバル bbox ────────────────────────────────────────────────
@@ -467,13 +473,24 @@ def main():
     def x_to_col(x_mm):
         return int(round((x_mm - g_x_min) / PX_SIZE))
 
-    seam1_col = x_to_col(SEAM1_X_MM)
-    seam2_col = x_to_col(SEAM2_X_MM)
-    section_cols = {
-        'frame_seibu': (0, seam1_col),
-        'frame_chubu': (seam1_col, seam2_col),
-        'frame_tobu':  (seam2_col, g_w),
-    }
+    # セクション分割位置（等倍基準の座標を縮尺比で換算）
+    ratio = XY_SCALE / BASE_XY_SCALE
+    if sc['sections'] == ('all',):
+        section_cols = {'all': (0, g_w)}
+        tab_pairs = []
+    else:
+        seam1_col = x_to_col(SEAM1_X_MM_BASE * ratio)
+        seam2_col = x_to_col(SEAM2_X_MM_BASE * ratio)
+        section_cols = {
+            'seibu': (0, seam1_col),
+            'chubu': (seam1_col, seam2_col),
+            'tobu':  (seam2_col, g_w),
+        }
+        tab_pairs = [('seibu', 'chubu'), ('chubu', 'tobu')]
+
+    keys = [k for k in sc['sections'] if k in section_keys]
+    if not keys:
+        return
 
     tab_d_px = round(TAB_D_MM  / PX_SIZE)
     clr_px   = max(1, round(TAB_CLR_MM / PX_SIZE))
@@ -484,7 +501,7 @@ def main():
     print('\nフェーズ1: 市町村マスク計算...')
     muni_masks  = {}   # pocket_mask
     ridge_masks = {}   # ridge_mask
-    for key in SECTIONS:
+    for key in sc['sections']:
         if key not in keys:
             continue
         col_s, col_e = section_cols[key]
@@ -495,10 +512,8 @@ def main():
         ridge_masks[key] = rm
 
     # ── フェーズ 2: タブ/スロット追加 ─────────────────────────────────
-    print('\nフェーズ2: タブ/スロット追加...')
     frame_masks  = {k: ~v for k, v in muni_masks.items()}
     pocket_masks = {k: v.copy() for k, v in muni_masks.items()}
-    # ridge_masks はフェーズ1で既に dict に入っている
 
     def add_tab_slot(key_l, key_r):
         if key_l not in frame_masks or key_r not in frame_masks:
@@ -509,9 +524,7 @@ def main():
         rm_r  = ridge_masks[key_r]
         h = fm_l.shape[0]
 
-        valid_l = fm_l[:, -1]
-        valid_r = fm_r[:, 0]
-        valid_both = valid_l & valid_r
+        valid_both = fm_l[:, -1] & fm_r[:, 0]
         tab_rows = make_tab_pattern(h, valid_both)
         print(f'  {key_l}→{key_r}: タブ行数={tab_rows.sum()} ({tab_rows.sum()*PX_SIZE:.0f}mm)')
 
@@ -528,8 +541,7 @@ def main():
         clr_struct = np.ones((2*clr_px+1, 1), dtype=bool)
         slot_rows_exp = binary_dilation(
             tab_rows.reshape(-1, 1), structure=clr_struct).ravel()
-        slot_depth = tab_d_px + clr_px
-        for d in range(slot_depth):
+        for d in range(tab_d_px + clr_px):
             if d < fm_r.shape[1]:
                 fm_r[slot_rows_exp, d]  = False
                 pm_r[slot_rows_exp, d]  = False
@@ -538,24 +550,59 @@ def main():
         pocket_masks[key_r] = pm_r
         ridge_masks[key_r]  = rm_r
 
-    add_tab_slot('frame_seibu', 'frame_chubu')
-    add_tab_slot('frame_chubu', 'frame_tobu')
+    if tab_pairs:
+        print('\nフェーズ2: タブ/スロット追加...')
+        for kl, kr in tab_pairs:
+            add_tab_slot(kl, kr)
 
     # ── フェーズ 3: STL 生成 ──────────────────────────────────────────
     print('\nフェーズ3: STL 生成...')
+    entries = []
     for key in keys:
-        if key not in frame_masks:
-            continue
         col_s, _ = section_cols[key]
         x_min_sec = g_x_min + col_s * PX_SIZE
         fm = frame_masks[key]
-        pm = pocket_masks[key]
-        rm = ridge_masks[key]
-        out_path = os.path.join(out_dir, f'{key}.stl')
-        total, mb = masks_to_stl(fm, pm, rm, x_min_sec, g_y_min, g_h, out_path)
+        fname = f'frame_{key}.stl'
+        out_path = os.path.join(out_dir, fname)
+        total, mb = masks_to_stl(fm, pocket_masks[key], ridge_masks[key],
+                                 x_min_sec, g_y_min, g_h, out_path)
         w_mm = fm.shape[1] * PX_SIZE
-        print(f'  {key}: {w_mm:.0f} × {g_h*PX_SIZE:.0f} mm  →  {total:,} tri, {mb:.1f} MB')
+        h_mm = g_h * PX_SIZE
+        print(f'  {key}: {w_mm:.0f} × {h_mm:.0f} mm  →  {total:,} tri, {mb:.1f} MB')
+        entries.append(dict(file=fname, key=key, label=SECTION_LABELS[key],
+                            w=round(w_mm, 1), h=round(h_mm, 1),
+                            tri=int(total), mb=round(mb, 1)))
 
+    manifest[scale_key] = dict(
+        label=sc['label'], note=sc['note'],
+        overall=dict(w=round((g_x_max - g_x_min), 1), h=round((g_y_max - g_y_min), 1)),
+        sections=entries,
+    )
+
+
+def main():
+    scale_keys, args = parse_scale_arg(sys.argv[1:])
+    section_keys = [a.replace('frame_', '') for a in args] or list(SECTION_LABELS)
+    for k in section_keys:
+        if k not in SECTION_LABELS:
+            raise SystemExit(f'不明なセクション: {k}  (有効: {", ".join(SECTION_LABELS)})')
+
+    base_dir      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    manifest_path = os.path.join(base_dir, 'public', 'data', 'frames.json')
+    manifest = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+    for scale_key in scale_keys:
+        gen_scale(scale_key, section_keys, base_dir, manifest)
+
+    # 縮尺の並びは scales.py の定義順に揃える
+    ordered = {k: manifest[k] for k in SCALES if k in manifest}
+    os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+    with open(manifest_path, 'w') as f:
+        json.dump(ordered, f, ensure_ascii=False, indent=1)
+    print(f'\nマニフェスト: {manifest_path}')
     print('\n全完了。')
 
 

@@ -9,18 +9,21 @@ Usage:
   python3 scripts/gen_stl.py 31201        # 鳥取市のみ
   python3 scripts/gen_stl.py --dec 6 31201
 
-平面スケール: 1/300,000（XY_SCALE = 1.5/450）
-縦方向倍率: 1.5 倍（大山 1,729m → 約 8.6mm）
+Usage:
+  python3 scripts/gen_stl.py --scale 600k          # 1/600,000 のみ
+  python3 scripts/gen_stl.py --scale 300k 31201    # 縮尺と市町村を指定
+
+縮尺: scripts/scales.py 参照（1/300,000 / 1/600,000 / 1/900,000）
+縦方向倍率: 1.5 倍（等倍で大山 1,729m → 約 8.6mm）
 裏面: 市町村名のみ（コードなし）
 """
 import json, math, os, struct, sys, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
+from scales import (SCALES, parse_scale_arg,
+                    PROJ_CENTER_LAT, PROJ_CENTER_LON, METERS_PER_DEGREE)
 
 # ── 定数 ──────────────────────────────────────────────────────────────────
-PROJ_CENTER_LAT = 35.35
-PROJ_CENTER_LON = 133.83
-METERS_PER_DEGREE = 111320.0
 COS_CENTER = math.cos(PROJ_CENTER_LAT * math.pi / 180)
 TILE_SIZE = 256
 DEM_TILE_URL = 'https://cyberjapandata.gsi.go.jp/xyz/dem/{z}/{x}/{y}.txt'
@@ -30,12 +33,10 @@ PREF_BBOX = dict(minLon=132.90, maxLon=134.70, minLat=34.90, maxLat=35.80)
 
 # デフォルトパラメータ
 ZOOM       = 13          # zoom13 で約 15m 解像度
-XY_SCALE   = 1.5 / 450   # 1/300,000 → 鳥取県全体 約 418 × 207 mm
-# ※ 東京都パズル（1/200,000）より小さめ。鳥取県は東西に長いため、
-#    全体を 3 分割した枠が 150mm 幅に収まるスケールを選定。
 Z_SCALE    = 1.5         # 縦方向倍率 1.5 倍（実寸だと起伏が小さいため強調）
-BASE_THICK = 3.0         # ベース厚さ (mm)
-DECIMATION = 4           # zoom13 × dec4 ≒ 62m グリッド ≒ 0.21mm/セル
+BASE_THICK = 3.0         # ベース厚さ (mm)（全縮尺共通）
+DECIMATION = 4           # 等倍で zoom13 × dec4 ≒ 62m グリッド ≒ 0.21mm/セル
+# ※ 間引きは縮尺に応じて dec_mult 倍する（モデル座標でのセル寸法を一定に保つ）
 CLEARANCE_MM = 0.3       # 境界クリアランス (mm)（枠側の 0.3mm と合わせて 0.6mm の遊び）
 BBOX_PAD   = 0.015       # 境界ファイルから bbox を計算する際のパディング（度）
 
@@ -71,6 +72,7 @@ MUNICIPALITY_PARAMS = {
 ENGRAVE_DEPTH   = 1.5   # 彫り深さ (mm)
 ENGRAVE_TEXT_MM = 8.0   # テキスト行高さ上限 (mm)
 ENGRAVE_MIN_MM  = 2.0   # テキスト行高さ下限 (mm)
+ENGRAVE_MIN_KEEP = 0.6  # これ未満しか収まらないなら彫刻しない（潰れて読めないため）
 
 # ── タイル座標変換 ─────────────────────────────────────────────────────────
 def lon_to_tile_x(lon, z): return int((lon + 180) / 360 * (2**z))
@@ -397,7 +399,7 @@ def pool_mask(mask, dec):
     return mask.reshape(h2 // dec, dec, w2 // dec, dec).any(axis=(1, 3))
 
 # ワールド座標スケール（gen_one で上書き可能）
-_CUR_XY_SCALE = XY_SCALE
+_CUR_XY_SCALE = SCALES['300k']['xy_scale']
 
 # ── ワールド座標グリッド ───────────────────────────────────────────────────
 def world_grid(bbox, values):
@@ -625,19 +627,21 @@ def write_stl(path, tri_arrays):
         f.write(all_tris.tobytes())
 
 # ── メイン ────────────────────────────────────────────────────────────────
-def gen_one(code, base_dir, dec):
+def gen_one(code, base_dir, dec, scale_key):
     global _CUR_XY_SCALE
+    scale = SCALES[scale_key]
     params = MUNICIPALITY_PARAMS.get(code, {})
-    _CUR_XY_SCALE = params.get('xy_scale', XY_SCALE)
+    _CUR_XY_SCALE = scale['xy_scale']
     pref_zoom = params.get('zoom', None)
-    dec = params.get('decimation', dec)
+    # 間引きは縮尺に応じて強める（モデル座標でのセル寸法を一定に保つ）
+    dec = params.get('decimation', dec) * scale['dec_mult']
 
     boundary_path = os.path.join(base_dir, 'public', 'data', 'boundary', f'{code}.json')
     dem_dir       = os.path.join(base_dir, 'public', 'data', 'dem')
-    out_dir       = os.path.join(base_dir, 'public', 'data', 'stl')
+    out_dir       = os.path.join(base_dir, 'public', 'data', 'stl', scale_key)
     out_path      = os.path.join(out_dir, f'{code}.stl')
 
-    print(f'\n=== {code} ===')
+    print(f'\n=== {code} @ {scale["label"]} ===')
     with open(boundary_path) as f:
         feature = json.load(f)
 
@@ -684,9 +688,15 @@ def gen_one(code, base_dir, dec):
 
     # 欠けずに収まったものを優先し、その中で最大サイズを選ぶ
     layout, text_mask, used_mm, keep = max(cands, key=lambda c: (c[3] >= 1.0, c[3], c[2]))
-    warn = '' if keep >= 1.0 else f'  ※ {keep*100:.0f}% しか収まらず'
-    print(f'  テキスト: {layout} {used_mm:.1f} mm  ピクセル: {text_mask.sum():,}{warn}')
-    text_mask_pooled = pool_mask(text_mask, dec)
+    if keep < ENGRAVE_MIN_KEEP:
+        # 潰れて読めない彫刻を入れるくらいなら、無地の裏面にする
+        print(f'  テキスト: {keep*100:.0f}% しか収まらないため彫刻しない（ピースが小さすぎる）')
+        text_mask = np.zeros_like(text_mask)
+        text_mask_pooled = pool_mask(text_mask, dec)
+    else:
+        warn = '' if keep >= 1.0 else f'  ※ {keep*100:.0f}% しか収まらず'
+        print(f'  テキスト: {layout} {used_mm:.1f} mm  ピクセル: {text_mask.sum():,}{warn}')
+        text_mask_pooled = pool_mask(text_mask, dec)
 
     print('  地形メッシュ生成...')
     terrain_tris, base_z = build_terrain(grid_bbox, clipped, dec)
@@ -705,13 +715,23 @@ def gen_one(code, base_dir, dec):
     print(f'  テキスト壁 tri: {len(txt_wall_tris):,}')
 
     os.makedirs(out_dir, exist_ok=True)
-    write_stl(out_path, [terrain_tris, wall_tris, bot_tris, txt_wall_tris])
+    parts = [terrain_tris, wall_tris, bot_tris, txt_wall_tris]
+    write_stl(out_path, parts)
     mb = os.path.getsize(out_path) / (1024**2)
-    total = len(terrain_tris) + len(wall_tris) + len(bot_tris) + len(txt_wall_tris)
+    total = sum(len(t) for t in parts)
     print(f'  完了: {out_path}  ({total:,} tri, {mb:.1f} MB)')
 
+    verts = np.concatenate([np.concatenate([t['v0'], t['v1'], t['v2']])
+                            for t in parts if len(t)])
+    lo = verts.min(axis=0); hi = verts.max(axis=0)
+    return dict(code=code, name=name,
+                w=round(float(hi[0] - lo[0]), 1),
+                h=round(float(hi[1] - lo[1]), 1),
+                z=round(float(hi[2] - lo[2]), 1),
+                tri=int(total), mb=round(mb, 1))
+
 def main():
-    args = sys.argv[1:]
+    scale_keys, args = parse_scale_arg(sys.argv[1:])
     dec = DECIMATION
     codes = []
     i = 0
@@ -724,9 +744,30 @@ def main():
         codes = CODES
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    print(f'decimation={dec}  zoom={ZOOM}  XY_SCALE=1/{1/XY_SCALE:.0f}  Z_SCALE={Z_SCALE}')
-    for code in codes:
-        gen_one(code, base_dir, dec)
+    manifest_path = os.path.join(base_dir, 'public', 'data', 'pieces.json')
+    manifest = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+    for scale_key in scale_keys:
+        sc = SCALES[scale_key]
+        print(f'\n########## 縮尺 {sc["label"]}（{sc["note"]}）  '
+              f'decimation={dec}×{sc["dec_mult"]}  zoom={ZOOM}  Z_SCALE={Z_SCALE} ##########')
+        entries = manifest.get(scale_key, {})
+        for code in codes:
+            info = gen_one(code, base_dir, dec, scale_key)
+            if info:
+                entries[code] = info
+        manifest[scale_key] = entries
+
+    # 縮尺・市町村コードの並びを定義順に揃える
+    ordered = {k: {c: manifest[k][c] for c in CODES if c in manifest[k]}
+               for k in SCALES if k in manifest}
+    os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+    with open(manifest_path, 'w') as f:
+        json.dump(ordered, f, ensure_ascii=False, indent=1)
+    print(f'\nマニフェスト: {manifest_path}')
     print('\n全完了。')
 
 if __name__ == '__main__':

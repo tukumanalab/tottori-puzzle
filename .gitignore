@@ -11,6 +11,12 @@ next-env.d.ts
 public/data/boundary/
 public/data/stl/
 public/data/dem/
+public/data/pieces.json
+public/data/frames.json
 
 # ローカル設定
 .claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc

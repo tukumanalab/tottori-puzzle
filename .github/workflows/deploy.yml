@@ -40,7 +40,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: public/data
-          key: data-${{ hashFiles('scripts/fetch-boundaries.ts', 'scripts/gen_stl.py', 'scripts/gen_frame.py') }}
+          key: data-${{ hashFiles('scripts/fetch-boundaries.ts', 'scripts/gen_stl.py', 'scripts/gen_frame.py', 'scripts/scales.py') }}
 
       - name: Fetch boundary data
         if: steps.cache-data.outputs.cache-hit != 'true'

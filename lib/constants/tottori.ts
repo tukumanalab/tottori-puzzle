@@ -1,4 +1,4 @@
-import type { MunicipalityInfo } from '../types';
+import type { MunicipalityInfo, ScaleInfo } from '../types';
 
 // 東部（鳥取市・岩美郡・八頭郡）
 export const TOBU: MunicipalityInfo[] = [
@@ -30,5 +30,14 @@ export const SEIBU: MunicipalityInfo[] = [
   { code:'31402', name:'日野町',   nameEn:'Hino',        color:'#c084fc' },
   { code:'31403', name:'江府町',   nameEn:'Kofu',        color:'#ec4899' },
 ];
+
+// 縮尺（scripts/scales.py と対応）
+export const SCALES: ScaleInfo[] = [
+  { key: '300k', label: '1/300,000', note: '等倍' },
+  { key: '600k', label: '1/600,000', note: '1/2' },
+  { key: '900k', label: '1/900,000', note: '1/3' },
+];
+
+export const DEFAULT_SCALE = '300k';
 
 export const BASE_PATH = process.env.NODE_ENV === 'production' ? '/tottori-puzzle' : '';
