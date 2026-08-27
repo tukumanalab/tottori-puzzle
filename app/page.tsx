@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { SEIBU, CHUBU, TOBU, SCALES, DEFAULT_SCALE, Z_SCALE_LABEL, BASE_PATH } from '../lib/constants/tottori';
+import { SEIBU, CHUBU, TOBU, SCALES, DEFAULT_SCALE, HEIGHTS, DEFAULT_HEIGHT, BASE_PATH } from '../lib/constants/tottori';
 import type { MunicipalityInfo, PieceManifest, FrameManifest } from '../lib/types';
 
 const StlViewer = dynamic(() => import('./components/StlViewer'), { ssr: false });
@@ -12,19 +12,20 @@ const GROUPS = [
   { label: '東部（鳥取市・岩美郡・八頭郡）',         zipName: 'tobu',  municipalities: TOBU },
 ];
 
-const README_TXT = (scaleLabel: string) =>
-  `鳥取県 3D 市町村パズル（縮尺 ${scaleLabel} / 高さ ${Z_SCALE_LABEL}）\n\n` +
+const README_TXT = (scaleLabel: string, heightLabel: string) =>
+  `鳥取県 3D 市町村パズル（縮尺 ${scaleLabel} / 高さ ${heightLabel}）\n\n` +
   '地形データ: 国土地理院 基盤地図情報数値標高モデル（DEM）\n' +
   '行政界データ: 国土交通省 国土数値情報（行政区域データ）N03-2024\n' +
   '本データは上記データを加工して作成したものです。\n';
 
 const mm = (v: number) => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
 const no2 = (n: number) => String(n).padStart(2, '0');
-const pieceFileName = (m: MunicipalityInfo, scale: string) =>
-  `${no2(m.no)}_${m.code}_${m.nameEn}_${scale}.stl`;
+const pieceFileName = (m: MunicipalityInfo, scale: string, height: string) =>
+  `${no2(m.no)}_${m.code}_${m.nameEn}_${scale}_${height}.stl`;
 
 export default function HomePage() {
   const [scale, setScale] = useState(DEFAULT_SCALE);
+  const [height, setHeight] = useState(DEFAULT_HEIGHT);
   const [pieces, setPieces] = useState<PieceManifest>({});
   const [frames, setFrames] = useState<FrameManifest>({});
   const [zippingKey, setZippingKey] = useState<string | null>(null);
@@ -38,9 +39,12 @@ export default function HomePage() {
   }, []);
 
   const scaleInfo = SCALES.find(s => s.key === scale)!;
-  const pieceInfo = pieces[scale] ?? {};
+  const heightInfo = HEIGHTS.find(h => h.key === height)!;
+  const pieceInfo = pieces[scale]?.[height] ?? {};
   const frameInfo = frames[scale];
-  const stlUrl = (file: string) => `${BASE_PATH}/data/stl/${scale}/${file}`;
+  // ピースは縮尺と高さで分かれるが、枠は境界データだけから作るので縮尺のみ
+  const pieceUrl = (code: string) => `${BASE_PATH}/data/stl/${scale}/${height}/${code}.stl`;
+  const frameUrl = (file: string) => `${BASE_PATH}/data/stl/${scale}/${file}`;
 
   function toggleExclude(code: string) {
     setExcluded(prev => {
@@ -65,14 +69,14 @@ export default function HomePage() {
       const zip = new JSZip();
       const targets = municipalities.filter(m => !excluded.has(m.code));
       await Promise.all(targets.map(async (m) => {
-        const resp = await fetch(stlUrl(`${m.code}.stl`));
-        if (resp.ok) zip.file(pieceFileName(m, scale), await resp.arrayBuffer());
+        const resp = await fetch(pieceUrl(m.code));
+        if (resp.ok) zip.file(pieceFileName(m, scale, height), await resp.arrayBuffer());
       }));
-      zip.file('README.txt', README_TXT(scaleInfo.label));
+      zip.file('README.txt', README_TXT(scaleInfo.label, heightInfo.label));
       const blob = await zip.generateAsync({ type: 'blob' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = `tottori-puzzle-${name}-${scale}.zip`; a.click();
+      a.href = url; a.download = `tottori-puzzle-${name}-${scale}-${height}.zip`; a.click();
       URL.revokeObjectURL(url);
     } finally {
       setZippingKey(null);
@@ -125,12 +129,51 @@ export default function HomePage() {
             縮尺で変わるのは平面の大きさと地形の起伏だけです。ベース厚さ 3mm・枠厚さ 4mm・
             嵌合のクリアランス 0.3mm・裏面の文字サイズは全縮尺で共通なので、どれを選んでも
             同じように嵌まり、同じ読みやすさになります。<br />
-            地形の起伏は{Z_SCALE_LABEL}に強調しています（起伏だけに掛かり、ベース厚さには掛かりません）。
           </p>
           <p className="text-xs text-gray-500">
-            市町村名の左の数字は 1〜19 の通し番号です。全国地方公共団体コード順
+            市町村名の左の数字は 1〜18 の通し番号です。全国地方公共団体コード順
             （市 4 つ → 岩美郡 → 八頭郡 → 東伯郡 → 西伯郡 → 日野郡）で振っていて、
-            ダウンロードするファイル名の先頭にも付きます（例: <code className="text-gray-400">01_31201_Tottori_300k.stl</code>）。
+            ダウンロードするファイル名の先頭にも付きます。<br />
+            日吉津村は米子市に囲まれた小さな村のため、米子市と 1 ピースにまとめて
+            境界に溝を彫っています。そのためピースは 18 個です。
+          </p>
+        </section>
+
+        <section className="flex flex-col gap-3">
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-widest border-b border-gray-800 pb-2">
+            高さ
+          </h2>
+          <div className="grid grid-cols-2 gap-2">
+            {HEIGHTS.map((h) => {
+              const active = h.key === height;
+              const daisen = pieces[scale]?.[h.key]?.['31386'];
+              return (
+                <button
+                  key={h.key}
+                  onClick={() => setHeight(h.key)}
+                  aria-pressed={active}
+                  className={`flex flex-col items-center gap-0.5 py-3 px-2 rounded-lg border transition-colors ${
+                    active
+                      ? 'border-emerald-500 bg-emerald-950/60 text-gray-100'
+                      : 'border-gray-800 hover:border-gray-600 text-gray-400'
+                  }`}
+                >
+                  <span className="font-semibold text-sm">{h.label}</span>
+                  <span className="text-xs text-gray-500">{h.note}</span>
+                  {daisen && (
+                    <span className="text-[11px] text-gray-600 mt-0.5">
+                      大山町 起伏 {daisen.relief.toFixed(1)} mm
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-xs text-gray-500">
+            地形の起伏に掛ける倍率です。実寸だと鳥取県の起伏は控えめなので、
+            山地をはっきり見せたいときは 3 倍を選んでください。倍率が掛かるのは起伏だけで
+            ベース厚さ 3mm には掛からないため、どちらでも枠への嵌まり方は変わりません。
+            枠は境界データだけから作っていて高さの影響を受けないため、両方で同じ枠を使えます。
           </p>
         </section>
 
@@ -186,21 +229,21 @@ export default function HomePage() {
                             {info && (
                               <div className="text-xs text-gray-600 whitespace-nowrap">
                                 {mm(info.w)} × {mm(info.h)} mm・全高 {info.z.toFixed(1)} mm
-                                <span className="text-gray-700">（うち起伏 {(info.z - 3).toFixed(1)} mm）</span>
+                                <span className="text-gray-700">（うち起伏 {info.relief.toFixed(1)} mm）</span>
                               </div>
                             )}
                           </div>
                         </div>
                         <div className="flex items-center gap-4 flex-shrink-0">
                           <button
-                            onClick={() => setPreview({ path: `${m.code}.stl`, name: `${m.no}. ${m.name}`, color: m.color })}
+                            onClick={() => setPreview({ path: pieceUrl(m.code), name: `${m.no}. ${m.name}`, color: m.color })}
                             className="text-sm text-gray-500 hover:text-gray-200 transition-colors"
                           >
                             プレビュー
                           </button>
                           <a
-                            href={stlUrl(`${m.code}.stl`)}
-                            download={pieceFileName(m, scale)}
+                            href={pieceUrl(m.code)}
+                            download={pieceFileName(m, scale, height)}
                             className="bg-blue-600 hover:bg-blue-500 transition-colors px-3 py-1.5 rounded text-sm font-medium"
                           >
                             ダウンロード
@@ -233,6 +276,7 @@ export default function HomePage() {
               : frameInfo
                 ? `ピースをはめ込むトレイ型の枠です。この縮尺なら全体（~${mm(frameInfo.overall.w)} × ${mm(frameInfo.overall.h)} mm）が 1 枚に収まるため分割していません。`
                 : 'ピースをはめ込むトレイ型の枠です。'}
+            {' '}高さは枠に影響しないため、実寸・3 倍のどちらでも同じ枠を使います。
           </p>
           <div className="flex flex-col gap-2">
             {(frameInfo?.sections ?? []).map((f) => (
@@ -243,13 +287,13 @@ export default function HomePage() {
                 </div>
                 <div className="flex items-center gap-4 flex-shrink-0">
                   <button
-                    onClick={() => setPreview({ path: f.file, name: `枠 — ${f.label}`, color: '#888888' })}
+                    onClick={() => setPreview({ path: frameUrl(f.file), name: `枠 — ${f.label}`, color: '#888888' })}
                     className="text-sm text-gray-500 hover:text-gray-200 transition-colors"
                   >
                     プレビュー
                   </button>
                   <a
-                    href={stlUrl(f.file)}
+                    href={frameUrl(f.file)}
                     download={f.file.replace('.stl', `_${scale}.stl`)}
                     className="bg-blue-600 hover:bg-blue-500 transition-colors px-3 py-1.5 rounded text-sm font-medium"
                   >
@@ -283,7 +327,9 @@ export default function HomePage() {
               </button>
               <span className="w-1 h-5 rounded-full flex-shrink-0" style={{ background: preview.color }} />
               <span className="font-semibold truncate">{preview.name}</span>
-              <span className="text-gray-500 text-xs flex-shrink-0">{scaleInfo.label}</span>
+              <span className="text-gray-500 text-xs flex-shrink-0">
+                {scaleInfo.label}{preview.path.includes(`/${height}/`) ? ` / ${heightInfo.label}` : ''}
+              </span>
               <span className="text-gray-500 text-xs hidden sm:inline flex-shrink-0">ドラッグで回転 / スクロールでズーム</span>
             </div>
             <button
@@ -295,7 +341,7 @@ export default function HomePage() {
             </button>
           </div>
           <div className="flex-1 min-h-0">
-            <StlViewer url={stlUrl(preview.path)} color={preview.color} />
+            <StlViewer url={preview.path} color={preview.color} />
           </div>
         </div>
       )}

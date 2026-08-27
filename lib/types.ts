@@ -9,9 +9,17 @@ export interface ScaleInfo {
   key: string; label: string; note: string;
 }
 
+export interface HeightInfo {
+  key: string; label: string; note: string;
+}
+
 export interface PieceInfo {
   code: string; name: string;
-  w: number; h: number; z: number; tri: number; mb: number;
+  members: string[];   // 1 ピースにまとめた市町村コード
+  w: number; h: number; z: number;
+  relief: number;      // 海面より上の高さ（地形の起伏）
+  base: number;        // 海面より下の厚み（溝を彫ると 3mm より厚くなる）
+  tri: number; mb: number;
 }
 
 export interface FrameSection {
@@ -25,6 +33,6 @@ export interface FrameScale {
   sections: FrameSection[];
 }
 
-// 縮尺キー → 市町村コード
-export type PieceManifest = Record<string, Record<string, PieceInfo>>;
+// 縮尺キー → 高さ倍率キー → 市町村コード
+export type PieceManifest = Record<string, Record<string, Record<string, PieceInfo>>>;
 export type FrameManifest = Record<string, FrameScale>;

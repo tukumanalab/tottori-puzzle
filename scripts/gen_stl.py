@@ -13,15 +13,21 @@ Usage:
   python3 scripts/gen_stl.py --scale 600k          # 1/600,000 のみ
   python3 scripts/gen_stl.py --scale 300k 31201    # 縮尺と市町村を指定
 
+  python3 scripts/gen_stl.py --height z30          # 3 倍強調版のみ
+
 縮尺:       scripts/scales.py の SCALES 参照（1/300,000 / 1/600,000 / 1/900,000）
-縦方向倍率: scripts/scales.py の Z_SCALE 参照（実寸の 3 倍）
+縦方向倍率: scripts/scales.py の HEIGHTS 参照（実寸 / 実寸の 3 倍）
             起伏だけに掛かり、ベース厚さ 3mm には掛からない
+統合:       scripts/scales.py の MERGE_GROUPS 参照
+            まとめたピースの境界には溝を彫る
 裏面: 市町村名のみ（コードなし）
 """
 import json, math, os, struct, sys, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
-from scales import (SCALES, Z_SCALE, parse_scale_arg,
+from scipy.ndimage import binary_dilation
+from scales import (SCALES, HEIGHTS, parse_scale_arg, parse_height_arg,
+                    piece_group, is_merged_away,
                     PROJ_CENTER_LAT, PROJ_CENTER_LON, METERS_PER_DEGREE)
 
 # ── 定数 ──────────────────────────────────────────────────────────────────
@@ -34,7 +40,7 @@ PREF_BBOX = dict(minLon=132.90, maxLon=134.70, minLat=34.90, maxLat=35.80)
 
 # デフォルトパラメータ
 ZOOM       = 13          # zoom13 で約 15m 解像度
-# 縦方向倍率（Z_SCALE）は scripts/scales.py で定義（実寸の 3 倍）
+# 縦方向倍率は scripts/scales.py の HEIGHTS で定義（実寸 / 実寸の 3 倍）
 BASE_THICK = 3.0         # ベース厚さ (mm)（全縮尺共通）
 DECIMATION = 4           # 等倍で zoom13 × dec4 ≒ 62m グリッド ≒ 0.21mm/セル
 # ※ 間引きは縮尺に応じて dec_mult 倍する（モデル座標でのセル寸法を一定に保つ）
@@ -68,6 +74,10 @@ MUNICIPALITY_PARAMS = {
     '31386': dict(decimation=6),            # 大山町 189km²
     '31384': dict(decimation=2),            # 日吉津村 4.2km²（県内最小・裏面文字の解像度確保）
 }
+
+# ── まとめたピースの境界溝 ────────────────────────────────────────────────
+GROOVE_WIDTH_MM = 1.0   # 溝の幅 (mm)
+GROOVE_DEPTH_MM = 0.8   # 溝の深さ (mm)
 
 # ── 彫刻設定 ──────────────────────────────────────────────────────────────
 ENGRAVE_DEPTH   = 1.5   # 彫り深さ (mm)
@@ -227,9 +237,10 @@ def feature_to_polygons(feature):
     return [rings for i, (_, rings) in enumerate(candidates) if i in main_idx]
 
 # ── ポリゴン塗りつぶしクリッピング ────────────────────────────────────────
-def clip_dem(bbox, values, polygons):
+def rasterize(bbox, shape, polygons):
+    """ポリゴン群をラスタライズした bool マスクを返す。"""
     from PIL import Image, ImageDraw
-    rows, cols = values.shape
+    rows, cols = shape
     lon_step = (bbox['maxLon'] - bbox['minLon']) / cols
     lat_step = (bbox['maxLat'] - bbox['minLat']) / rows
     mask_img = Image.new('L', (cols, rows), 0)
@@ -243,8 +254,27 @@ def clip_dem(bbox, values, polygons):
         ]
         if len(pixels) >= 3:
             draw.polygon(pixels, fill=255)
-    mask = np.array(mask_img) > 0
-    return np.where(mask, values, np.nan)
+    return np.array(mask_img) > 0
+
+
+def clip_dem(bbox, values, polygons):
+    return np.where(rasterize(bbox, values.shape, polygons), values, np.nan)
+
+
+def boundary_groove_mask(bbox, shape, parts, width_px):
+    """まとめたピース内部の、市町村どうしの境目を width_px の幅で返す。"""
+    label = np.zeros(shape, dtype=np.int32)
+    for i, polys in enumerate(parts, 1):
+        label[rasterize(bbox, shape, polys)] = i
+    rows, cols = shape
+    padded = np.pad(label, 1)
+    edge = np.zeros(shape, dtype=bool)
+    for dr, dc in [(-1, 0), (+1, 0), (0, -1), (0, +1)]:
+        shifted = padded[1+dr:1+dr+rows, 1+dc:1+dc+cols]
+        edge |= (label > 0) & (shifted > 0) & (label != shifted)
+    if width_px > 1:
+        edge = binary_dilation(edge, structure=np.ones((width_px, width_px), dtype=bool))
+    return edge
 
 # ── 境界クリアランス ──────────────────────────────────────────────────────
 def apply_clearance(clipped, px):
@@ -401,6 +431,7 @@ def pool_mask(mask, dec):
 
 # ワールド座標スケール（gen_one で上書きする）
 _CUR_XY_SCALE = SCALES['300k']['xy_scale']
+_CUR_Z_SCALE  = HEIGHTS['z10']['z_scale']
 
 # ── ワールド座標グリッド ───────────────────────────────────────────────────
 def world_grid(bbox, values):
@@ -415,7 +446,7 @@ def world_grid(bbox, values):
     s = _CUR_XY_SCALE
     wx = ((lons2d - PROJ_CENTER_LON) * COS_CENTER * METERS_PER_DEGREE * s).astype(np.float32)
     wy = ((lats2d - PROJ_CENTER_LAT) * METERS_PER_DEGREE * s).astype(np.float32)
-    wz = np.where(np.isnan(values), np.nan, (values * Z_SCALE * s).astype(np.float32))
+    wz = np.where(np.isnan(values), np.nan, (values * _CUR_Z_SCALE * s).astype(np.float32))
     return wx, wy, wz
 
 # ── STL 型 ────────────────────────────────────────────────────────────────
@@ -628,8 +659,15 @@ def write_stl(path, tri_arrays):
         f.write(all_tris.tobytes())
 
 # ── メイン ────────────────────────────────────────────────────────────────
-def gen_one(code, base_dir, dec, scale_key):
-    global _CUR_XY_SCALE
+def gen_one(code, base_dir, dec, scale_key, height_keys):
+    """1 ピースを、指定された全ての高さ倍率で生成する。
+
+    DEM の取得・クリッピング・裏面テキストの配置は高さ倍率に依存しないので
+    一度だけ行い、メッシュ生成だけを倍率ごとに繰り返す。
+    MERGE_GROUPS でまとめる指定がある場合は複数の市町村を 1 ピースにし、
+    境界には溝を彫る。
+    """
+    global _CUR_XY_SCALE, _CUR_Z_SCALE
     scale = SCALES[scale_key]
     params = MUNICIPALITY_PARAMS.get(code, {})
     _CUR_XY_SCALE = scale['xy_scale']
@@ -637,20 +675,33 @@ def gen_one(code, base_dir, dec, scale_key):
     # 間引きは縮尺に応じて強める（モデル座標でのセル寸法を一定に保つ）
     dec = params.get('decimation', dec) * scale['dec_mult']
 
-    boundary_path = os.path.join(base_dir, 'public', 'data', 'boundary', f'{code}.json')
-    dem_dir       = os.path.join(base_dir, 'public', 'data', 'dem')
+    boundary_dir = os.path.join(base_dir, 'public', 'data', 'boundary')
+    dem_dir      = os.path.join(base_dir, 'public', 'data', 'dem')
 
     print(f'\n=== {code} @ {scale["label"]} ===')
-    with open(boundary_path) as f:
-        feature = json.load(f)
 
-    name = feature['properties'].get('name', code)
-    print(f'  名称: {name}')
+    # まとめる市町村があれば、それぞれのポリゴンを別々に保持する
+    # （境界に溝を彫るために、どこが境目かを知る必要があるため）
+    group = piece_group(code)
+    member_codes = [code] + (group['others'] if group else [])
+    parts, member_names = [], []
+    for c in member_codes:
+        with open(os.path.join(boundary_dir, f'{c}.json')) as f:
+            feat = json.load(f)
+        polys = feature_to_polygons(feat)
+        if not polys:
+            print(f'  警告: {c} に有効なポリゴンがありません。スキップ。')
+            return {}
+        parts.append(polys)
+        member_names.append(feat['properties'].get('name', c))
 
-    polygons = feature_to_polygons(feature)
-    if not polygons:
-        print('  警告: 有効なポリゴンがありません。スキップ。')
-        return None
+    name = group['name'] if group else member_names[0]
+    if group:
+        print(f'  名称: {name}  ({" + ".join(member_names)} を 1 ピースに統合)')
+    else:
+        print(f'  名称: {name}')
+
+    polygons = [p for part in parts for p in part]
     bbox = compute_bbox(polygons)
     print(f'  bbox: lon {bbox["minLon"]:.4f}–{bbox["maxLon"]:.4f}  lat {bbox["minLat"]:.4f}–{bbox["maxLat"]:.4f}')
 
@@ -672,7 +723,19 @@ def gen_one(code, base_dir, dec, scale_key):
     print(f'  有効セル: {valid_n:,}')
     if valid_n == 0:
         print('  警告: 有効セルがありません。スキップ。')
-        return None
+        return {}
+
+    # まとめたピースは、内部の市町村境界に溝を彫る。マスクだけここで作り、
+    # 実際に掘るのは倍率ごと（溝の深さ mm を Z 倍率に依らず一定にするため）。
+    # 掘り方は標高そのものを下げるだけなので、上面・側壁・底面のどれもが
+    # 自動的に追従し、ハイトフィールドのまま水密性が保たれる。
+    groove = None
+    if len(parts) > 1:
+        groove_px = max(1, round(GROOVE_WIDTH_MM * px_per_mm))
+        groove = boundary_groove_mask(grid_bbox, clipped.shape, parts, groove_px)
+        groove &= ~np.isnan(clipped)
+        print(f'  境界溝: 幅 {groove_px} px ({GROOVE_WIDTH_MM} mm) '
+              f'深さ {GROOVE_DEPTH_MM} mm  セル {int(groove.sum()):,}')
 
     print('  テキストマスク生成...')
     jp_font = find_jp_font()
@@ -680,10 +743,16 @@ def gen_one(code, base_dir, dec, scale_key):
     # 裏面には市町村名のみ印刷（コードなし）
     # 1行・2行どちらが大きく収まるか試す
     cands = [('1行', *fit_text_mask(clipped, [name], jp_font, px_per_mm))]
-    # 名称が4文字以上なら2行分割も試みる（例: 「日吉」「津村」）
-    if len(name) >= 4:
+    # 2行分割も試みる。「・」を含む名前はそこで折り返す（例:「米子市」「日吉津村」）
+    if '・' in name:
+        lines = name.split('・')
+    elif len(name) >= 4:
         mid = len(name) // 2
-        cands.append(('2行', *fit_text_mask(clipped, [name[:mid], name[mid:]], jp_font, px_per_mm)))
+        lines = [name[:mid], name[mid:]]
+    else:
+        lines = None
+    if lines:
+        cands.append((f'{len(lines)}行', *fit_text_mask(clipped, lines, jp_font, px_per_mm)))
 
     # 欠けずに収まったものを優先し、その中で最大サイズを選ぶ
     layout, text_mask, used_mm, keep = max(cands, key=lambda c: (c[3] >= 1.0, c[3], c[2]))
@@ -697,34 +766,51 @@ def gen_one(code, base_dir, dec, scale_key):
         print(f'  テキスト: {layout} {used_mm:.1f} mm  ピクセル: {text_mask.sum():,}{warn}')
         text_mask_pooled = pool_mask(text_mask, dec)
 
-    out_dir  = os.path.join(base_dir, 'public', 'data', 'stl', scale_key)
-    out_path = os.path.join(out_dir, f'{code}.stl')
+    # ── 高さ倍率ごとにメッシュを生成 ──────────────────────────────
+    results = {}
+    for hk in height_keys:
+        _CUR_Z_SCALE = HEIGHTS[hk]['z_scale']
 
-    terrain_tris, base_z = build_terrain(grid_bbox, clipped, dec)
-    wall_tris     = build_walls(grid_bbox, clipped, base_z, dec)
-    bot_tris      = build_bottom(grid_bbox, clipped, base_z, dec, text_mask_pooled)
-    txt_wall_tris = build_text_walls(grid_bbox, clipped, base_z, dec, text_mask_pooled)
+        # 溝の深さ（mm）を倍率によらず一定にするため、標高の引き算量を換算する
+        if groove is not None:
+            depth_m = GROOVE_DEPTH_MM / (_CUR_Z_SCALE * _CUR_XY_SCALE)
+            grid = np.where(groove, clipped - depth_m, clipped)
+        else:
+            grid = clipped
 
-    os.makedirs(out_dir, exist_ok=True)
-    parts = [terrain_tris, wall_tris, bot_tris, txt_wall_tris]
-    write_stl(out_path, parts)
-    mb = os.path.getsize(out_path) / (1024**2)
-    total = sum(len(t) for t in parts)
+        out_dir  = os.path.join(base_dir, 'public', 'data', 'stl', scale_key, hk)
+        out_path = os.path.join(out_dir, f'{code}.stl')
 
-    verts = np.concatenate([np.concatenate([t['v0'], t['v1'], t['v2']])
-                            for t in parts if len(t)])
-    lo = verts.min(axis=0); hi = verts.max(axis=0)
-    info = dict(code=code, name=name,
-                w=round(float(hi[0] - lo[0]), 1),
-                h=round(float(hi[1] - lo[1]), 1),
-                z=round(float(hi[2] - lo[2]), 1),
-                tri=int(total), mb=round(mb, 1))
-    print(f'  完了: 起伏 {hi[2]:.1f} mm / 全高 {info["z"]:.1f} mm  '
-          f'→ {os.path.relpath(out_path, base_dir)}  ({total:,} tri, {mb:.1f} MB)')
-    return info
+        terrain_tris, base_z = build_terrain(grid_bbox, grid, dec)
+        wall_tris     = build_walls(grid_bbox, grid, base_z, dec)
+        bot_tris      = build_bottom(grid_bbox, grid, base_z, dec, text_mask_pooled)
+        txt_wall_tris = build_text_walls(grid_bbox, grid, base_z, dec, text_mask_pooled)
+
+        os.makedirs(out_dir, exist_ok=True)
+        tri_parts = [terrain_tris, wall_tris, bot_tris, txt_wall_tris]
+        write_stl(out_path, tri_parts)
+        mb = os.path.getsize(out_path) / (1024**2)
+        total = sum(len(t) for t in tri_parts)
+
+        verts = np.concatenate([np.concatenate([t['v0'], t['v1'], t['v2']])
+                                for t in tri_parts if len(t)])
+        lo = verts.min(axis=0); hi = verts.max(axis=0)
+        # relief は海面(z=0)より上の高さ、base は下側の厚み。
+        # 溝を彫るとベースがその分厚くなるので、z - 3 では起伏を出せない。
+        results[hk] = dict(code=code, name=name, members=member_codes,
+                           w=round(float(hi[0] - lo[0]), 1),
+                           h=round(float(hi[1] - lo[1]), 1),
+                           z=round(float(hi[2] - lo[2]), 1),
+                           relief=round(float(hi[2]), 1),
+                           base=round(float(-lo[2]), 1),
+                           tri=int(total), mb=round(mb, 1))
+        print(f'  {HEIGHTS[hk]["label"]}: 起伏 {hi[2]:.1f} mm / 全高 {results[hk]["z"]:.1f} mm'
+              f'  → {os.path.relpath(out_path, base_dir)}  ({total:,} tri, {mb:.1f} MB)')
+    return results
 
 def main():
     scale_keys, args = parse_scale_arg(sys.argv[1:])
+    height_keys, args = parse_height_arg(args)
     dec = DECIMATION
     codes = []
     i = 0
@@ -735,6 +821,11 @@ def main():
             codes.append(args[i]); i += 1
     if not codes:
         codes = CODES
+    # 他のピースに統合された市町村は単独では出力しない
+    skipped = [c for c in codes if is_merged_away(c)]
+    codes = [c for c in codes if not is_merged_away(c)]
+    if skipped:
+        print(f'統合済みのためスキップ: {", ".join(skipped)}')
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     manifest_path = os.path.join(base_dir, 'public', 'data', 'pieces.json')
@@ -743,20 +834,23 @@ def main():
         with open(manifest_path) as f:
             manifest = json.load(f)
 
+    heights_desc = ' / '.join(HEIGHTS[h]['label'] for h in height_keys)
     for scale_key in scale_keys:
         sc = SCALES[scale_key]
-        print(f'\n########## 縮尺 {sc["label"]}（{sc["note"]}）  高さ 実寸の {Z_SCALE:g} 倍  '
+        print(f'\n########## 縮尺 {sc["label"]}（{sc["note"]}）  高さ {heights_desc}  '
               f'decimation={dec}×{sc["dec_mult"]}  zoom={ZOOM} ##########')
-        entries = manifest.get(scale_key, {})
+        by_height = manifest.get(scale_key, {})
         for code in codes:
-            info = gen_one(code, base_dir, dec, scale_key)
-            if info:
-                entries[code] = info
-        manifest[scale_key] = entries
+            for hk, info in gen_one(code, base_dir, dec, scale_key, height_keys).items():
+                by_height.setdefault(hk, {})[code] = info
+        manifest[scale_key] = by_height
 
-    # 縮尺・市町村コードの並びを定義順に揃える
-    ordered = {k: {c: manifest[k][c] for c in CODES if c in manifest[k]}
-               for k in SCALES if k in manifest}
+    # 縮尺・高さ・市町村コードの並びを定義順に揃える
+    ordered = {
+        sk: {hk: {c: manifest[sk][hk][c] for c in CODES if c in manifest[sk][hk]}
+             for hk in HEIGHTS if hk in manifest[sk]}
+        for sk in SCALES if sk in manifest
+    }
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
     with open(manifest_path, 'w') as f:
         json.dump(ordered, f, ensure_ascii=False, indent=1)

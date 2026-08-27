@@ -1,4 +1,4 @@
-import type { MunicipalityInfo, ScaleInfo } from '../types';
+import type { MunicipalityInfo, ScaleInfo, HeightInfo } from '../types';
 
 // 東部（鳥取市・岩美郡・八頭郡）
 export const TOBU: MunicipalityInfo[] = [
@@ -20,15 +20,14 @@ export const CHUBU: MunicipalityInfo[] = [
 
 // 西部（米子市・境港市・西伯郡・日野郡）
 export const SEIBU: MunicipalityInfo[] = [
-  { no: 2, code:'31202', name:'米子市',   nameEn:'Yonago',      color:'#06b6d4' },
+  { no: 2, code:'31202', name:'米子市・日吉津村', nameEn:'Yonago-Hiezu', color:'#06b6d4' },
   { no: 4, code:'31204', name:'境港市',   nameEn:'Sakaiminato', color:'#0ea5e9' },
-  { no:13, code:'31384', name:'日吉津村', nameEn:'Hiezu',       color:'#38bdf8' },
-  { no:14, code:'31386', name:'大山町',   nameEn:'Daisen',      color:'#3b82f6' },
-  { no:15, code:'31389', name:'南部町',   nameEn:'Nanbu',       color:'#6366f1' },
-  { no:16, code:'31390', name:'伯耆町',   nameEn:'Hoki',        color:'#818cf8' },
-  { no:17, code:'31401', name:'日南町',   nameEn:'Nichinan',    color:'#a855f7' },
-  { no:18, code:'31402', name:'日野町',   nameEn:'Hino',        color:'#c084fc' },
-  { no:19, code:'31403', name:'江府町',   nameEn:'Kofu',        color:'#ec4899' },
+  { no:13, code:'31386', name:'大山町',   nameEn:'Daisen',      color:'#3b82f6' },
+  { no:14, code:'31389', name:'南部町',   nameEn:'Nanbu',       color:'#6366f1' },
+  { no:15, code:'31390', name:'伯耆町',   nameEn:'Hoki',        color:'#818cf8' },
+  { no:16, code:'31401', name:'日南町',   nameEn:'Nichinan',    color:'#a855f7' },
+  { no:17, code:'31402', name:'日野町',   nameEn:'Hino',        color:'#c084fc' },
+  { no:18, code:'31403', name:'江府町',   nameEn:'Kofu',        color:'#ec4899' },
 ];
 
 // 縮尺（scripts/scales.py と対応）
@@ -40,8 +39,14 @@ export const SCALES: ScaleInfo[] = [
 
 export const DEFAULT_SCALE = '300k';
 
-// 高さ（Z 方向）は実寸の 3 倍（scripts/scales.py の Z_SCALE）。
+// 高さ（Z 方向）の倍率＝実寸に対する倍率（scripts/scales.py の HEIGHTS と対応）。
 // 地形の起伏だけに掛かり、ベース厚さ 3mm には掛からない。
-export const Z_SCALE_LABEL = '実寸の 3 倍';
+// 枠は境界データだけから作るため高さの影響を受けず、両モードで共通。
+export const HEIGHTS: HeightInfo[] = [
+  { key: 'z10', label: '実寸',        note: '通常' },
+  { key: 'z30', label: '実寸の 3 倍', note: '強調' },
+];
+
+export const DEFAULT_HEIGHT = 'z10';
 
 export const BASE_PATH = process.env.NODE_ENV === 'production' ? '/tottori-puzzle' : '';

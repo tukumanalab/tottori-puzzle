@@ -29,7 +29,7 @@ from collections import defaultdict
 import numpy as np
 from PIL import Image, ImageDraw
 from scipy.ndimage import binary_dilation
-from scales import (SCALES, BASE_XY_SCALE, parse_scale_arg,
+from scales import (SCALES, BASE_XY_SCALE, parse_scale_arg, MERGED_INTO,
                     PROJ_CENTER_LAT, PROJ_CENTER_LON, METERS_PER_DEGREE)
 
 # ── 座標変換定数（gen_stl.py と一致させること） ────────────────────────────
@@ -189,7 +189,17 @@ def compute_municipality_mask(codes, boundary_dir, g_x_min, g_y_min, g_h,
     label_map = np.zeros((h, section_w), dtype=np.int32)
     hole_mask = np.zeros((h, section_w), dtype=bool)
 
-    for idx, code in enumerate(codes, 1):
+    # 1 ピースにまとめる市町村は同じラベルにする。こうすると間の境界が
+    # リッジとして検出されず、ポケットも 1 つに繋がる。
+    reps = []
+    for code in codes:
+        rep_code = MERGED_INTO.get(code, code)
+        if rep_code not in reps:
+            reps.append(rep_code)
+    label_of = {code: reps.index(MERGED_INTO.get(code, code)) + 1 for code in codes}
+
+    for code in codes:
+        idx = label_of[code]
         path = os.path.join(boundary_dir, f'{code}.json')
         with open(path) as f:
             feat = json.load(f)
