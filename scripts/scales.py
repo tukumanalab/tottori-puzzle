@@ -46,33 +46,9 @@ DEFAULT_SCALE = '300k'
 
 # ── 高さ（Z 方向）の倍率 ────────────────────────────────────────────────────
 # 実寸に対する倍率。地形の起伏だけに掛かり、ベース厚さ 3mm には掛からない。
-# 枠は境界データだけから作るため高さ倍率の影響を受けず、全モードで共通に使える。
-HEIGHTS = {
-    'z15': dict(label='1.5 倍', note='標準', z_scale=1.5),
-    'z20': dict(label='2 倍',   note='強調', z_scale=2.0),
-    'z30': dict(label='3 倍',   note='最大', z_scale=3.0),
-}
-
-DEFAULT_HEIGHT = 'z15'
-
-
-def parse_height_arg(args):
-    """引数から --height を取り出し、(高さキーのリスト, 残りの引数) を返す。"""
-    keys, rest, i = [], [], 0
-    while i < len(args):
-        if args[i] == '--height' and i + 1 < len(args):
-            for k in args[i+1].split(','):
-                k = k.strip()
-                if k == 'all':
-                    keys.extend(HEIGHTS)
-                elif k in HEIGHTS:
-                    keys.append(k)
-                else:
-                    raise SystemExit(f'不明な高さ倍率: {k}  (有効: {", ".join(HEIGHTS)}, all)')
-            i += 2
-        else:
-            rest.append(args[i]); i += 1
-    return (keys or list(HEIGHTS)), rest
+# 枠は境界データだけから作るため、この値の影響を受けない。
+# 等倍縮尺で大山 1,729m → 約 17mm の起伏になる。
+Z_SCALE = 3.0
 
 
 def parse_scale_arg(args):

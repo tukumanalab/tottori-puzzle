@@ -13,17 +13,15 @@ Usage:
   python3 scripts/gen_stl.py --scale 600k          # 1/600,000 のみ
   python3 scripts/gen_stl.py --scale 300k 31201    # 縮尺と市町村を指定
 
-  python3 scripts/gen_stl.py --height z30          # 高さ 3 倍のみ
-
 縮尺:       scripts/scales.py の SCALES 参照（1/300,000 / 1/600,000 / 1/900,000）
-縦方向倍率: scripts/scales.py の HEIGHTS 参照（実寸の 1.5 / 2 / 3 倍）
+縦方向倍率: scripts/scales.py の Z_SCALE 参照（実寸の 3 倍）
             起伏だけに掛かり、ベース厚さ 3mm には掛からない
 裏面: 市町村名のみ（コードなし）
 """
 import json, math, os, struct, sys, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
-from scales import (SCALES, HEIGHTS, parse_scale_arg, parse_height_arg,
+from scales import (SCALES, Z_SCALE, parse_scale_arg,
                     PROJ_CENTER_LAT, PROJ_CENTER_LON, METERS_PER_DEGREE)
 
 # ── 定数 ──────────────────────────────────────────────────────────────────
@@ -36,7 +34,7 @@ PREF_BBOX = dict(minLon=132.90, maxLon=134.70, minLat=34.90, maxLat=35.80)
 
 # デフォルトパラメータ
 ZOOM       = 13          # zoom13 で約 15m 解像度
-# 縦方向倍率は scripts/scales.py の HEIGHTS で選ぶ（実寸の 1.5 / 2 / 3 倍）
+# 縦方向倍率（Z_SCALE）は scripts/scales.py で定義（実寸の 3 倍）
 BASE_THICK = 3.0         # ベース厚さ (mm)（全縮尺共通）
 DECIMATION = 4           # 等倍で zoom13 × dec4 ≒ 62m グリッド ≒ 0.21mm/セル
 # ※ 間引きは縮尺に応じて dec_mult 倍する（モデル座標でのセル寸法を一定に保つ）
@@ -403,7 +401,6 @@ def pool_mask(mask, dec):
 
 # ワールド座標スケール（gen_one で上書きする）
 _CUR_XY_SCALE = SCALES['300k']['xy_scale']
-_CUR_Z_SCALE  = HEIGHTS['z15']['z_scale']
 
 # ── ワールド座標グリッド ───────────────────────────────────────────────────
 def world_grid(bbox, values):
@@ -418,7 +415,7 @@ def world_grid(bbox, values):
     s = _CUR_XY_SCALE
     wx = ((lons2d - PROJ_CENTER_LON) * COS_CENTER * METERS_PER_DEGREE * s).astype(np.float32)
     wy = ((lats2d - PROJ_CENTER_LAT) * METERS_PER_DEGREE * s).astype(np.float32)
-    wz = np.where(np.isnan(values), np.nan, (values * _CUR_Z_SCALE * s).astype(np.float32))
+    wz = np.where(np.isnan(values), np.nan, (values * Z_SCALE * s).astype(np.float32))
     return wx, wy, wz
 
 # ── STL 型 ────────────────────────────────────────────────────────────────
@@ -631,13 +628,8 @@ def write_stl(path, tri_arrays):
         f.write(all_tris.tobytes())
 
 # ── メイン ────────────────────────────────────────────────────────────────
-def gen_one(code, base_dir, dec, scale_key, height_keys):
-    """1 市町村を、指定された全ての高さ倍率で生成する。
-
-    DEM の取得・クリッピング・裏面テキストの配置は高さ倍率に依存しないので
-    一度だけ行い、メッシュ生成だけを倍率ごとに繰り返す。
-    """
-    global _CUR_XY_SCALE, _CUR_Z_SCALE
+def gen_one(code, base_dir, dec, scale_key):
+    global _CUR_XY_SCALE
     scale = SCALES[scale_key]
     params = MUNICIPALITY_PARAMS.get(code, {})
     _CUR_XY_SCALE = scale['xy_scale']
@@ -658,7 +650,7 @@ def gen_one(code, base_dir, dec, scale_key, height_keys):
     polygons = feature_to_polygons(feature)
     if not polygons:
         print('  警告: 有効なポリゴンがありません。スキップ。')
-        return {}
+        return None
     bbox = compute_bbox(polygons)
     print(f'  bbox: lon {bbox["minLon"]:.4f}–{bbox["maxLon"]:.4f}  lat {bbox["minLat"]:.4f}–{bbox["maxLat"]:.4f}')
 
@@ -680,7 +672,7 @@ def gen_one(code, base_dir, dec, scale_key, height_keys):
     print(f'  有効セル: {valid_n:,}')
     if valid_n == 0:
         print('  警告: 有効セルがありません。スキップ。')
-        return {}
+        return None
 
     print('  テキストマスク生成...')
     jp_font = find_jp_font()
@@ -705,39 +697,34 @@ def gen_one(code, base_dir, dec, scale_key, height_keys):
         print(f'  テキスト: {layout} {used_mm:.1f} mm  ピクセル: {text_mask.sum():,}{warn}')
         text_mask_pooled = pool_mask(text_mask, dec)
 
-    # ── 高さ倍率ごとにメッシュを生成 ──────────────────────────────
-    results = {}
-    for hk in height_keys:
-        _CUR_Z_SCALE = HEIGHTS[hk]['z_scale']
-        out_dir  = os.path.join(base_dir, 'public', 'data', 'stl', scale_key, hk)
-        out_path = os.path.join(out_dir, f'{code}.stl')
+    out_dir  = os.path.join(base_dir, 'public', 'data', 'stl', scale_key)
+    out_path = os.path.join(out_dir, f'{code}.stl')
 
-        terrain_tris, base_z = build_terrain(grid_bbox, clipped, dec)
-        wall_tris     = build_walls(grid_bbox, clipped, base_z, dec)
-        bot_tris      = build_bottom(grid_bbox, clipped, base_z, dec, text_mask_pooled)
-        txt_wall_tris = build_text_walls(grid_bbox, clipped, base_z, dec, text_mask_pooled)
+    terrain_tris, base_z = build_terrain(grid_bbox, clipped, dec)
+    wall_tris     = build_walls(grid_bbox, clipped, base_z, dec)
+    bot_tris      = build_bottom(grid_bbox, clipped, base_z, dec, text_mask_pooled)
+    txt_wall_tris = build_text_walls(grid_bbox, clipped, base_z, dec, text_mask_pooled)
 
-        os.makedirs(out_dir, exist_ok=True)
-        parts = [terrain_tris, wall_tris, bot_tris, txt_wall_tris]
-        write_stl(out_path, parts)
-        mb = os.path.getsize(out_path) / (1024**2)
-        total = sum(len(t) for t in parts)
+    os.makedirs(out_dir, exist_ok=True)
+    parts = [terrain_tris, wall_tris, bot_tris, txt_wall_tris]
+    write_stl(out_path, parts)
+    mb = os.path.getsize(out_path) / (1024**2)
+    total = sum(len(t) for t in parts)
 
-        verts = np.concatenate([np.concatenate([t['v0'], t['v1'], t['v2']])
-                                for t in parts if len(t)])
-        lo = verts.min(axis=0); hi = verts.max(axis=0)
-        results[hk] = dict(code=code, name=name,
-                           w=round(float(hi[0] - lo[0]), 1),
-                           h=round(float(hi[1] - lo[1]), 1),
-                           z=round(float(hi[2] - lo[2]), 1),
-                           tri=int(total), mb=round(mb, 1))
-        print(f'  高さ{HEIGHTS[hk]["label"]}: 起伏 {hi[2]:.1f} mm / 全高 {results[hk]["z"]:.1f} mm'
-              f'  → {os.path.relpath(out_path, base_dir)}  ({total:,} tri, {mb:.1f} MB)')
-    return results
+    verts = np.concatenate([np.concatenate([t['v0'], t['v1'], t['v2']])
+                            for t in parts if len(t)])
+    lo = verts.min(axis=0); hi = verts.max(axis=0)
+    info = dict(code=code, name=name,
+                w=round(float(hi[0] - lo[0]), 1),
+                h=round(float(hi[1] - lo[1]), 1),
+                z=round(float(hi[2] - lo[2]), 1),
+                tri=int(total), mb=round(mb, 1))
+    print(f'  完了: 起伏 {hi[2]:.1f} mm / 全高 {info["z"]:.1f} mm  '
+          f'→ {os.path.relpath(out_path, base_dir)}  ({total:,} tri, {mb:.1f} MB)')
+    return info
 
 def main():
     scale_keys, args = parse_scale_arg(sys.argv[1:])
-    height_keys, args = parse_height_arg(args)
     dec = DECIMATION
     codes = []
     i = 0
@@ -756,23 +743,20 @@ def main():
         with open(manifest_path) as f:
             manifest = json.load(f)
 
-    heights_desc = ' / '.join(HEIGHTS[h]['label'] for h in height_keys)
     for scale_key in scale_keys:
         sc = SCALES[scale_key]
-        print(f'\n########## 縮尺 {sc["label"]}（{sc["note"]}）  高さ {heights_desc}  '
+        print(f'\n########## 縮尺 {sc["label"]}（{sc["note"]}）  高さ 実寸の {Z_SCALE:g} 倍  '
               f'decimation={dec}×{sc["dec_mult"]}  zoom={ZOOM} ##########')
-        by_height = manifest.get(scale_key, {})
+        entries = manifest.get(scale_key, {})
         for code in codes:
-            for hk, info in gen_one(code, base_dir, dec, scale_key, height_keys).items():
-                by_height.setdefault(hk, {})[code] = info
-        manifest[scale_key] = by_height
+            info = gen_one(code, base_dir, dec, scale_key)
+            if info:
+                entries[code] = info
+        manifest[scale_key] = entries
 
-    # 縮尺・高さ・市町村コードの並びを定義順に揃える
-    ordered = {
-        sk: {hk: {c: manifest[sk][hk][c] for c in CODES if c in manifest[sk][hk]}
-             for hk in HEIGHTS if hk in manifest[sk]}
-        for sk in SCALES if sk in manifest
-    }
+    # 縮尺・市町村コードの並びを定義順に揃える
+    ordered = {k: {c: manifest[k][c] for c in CODES if c in manifest[k]}
+               for k in SCALES if k in manifest}
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
     with open(manifest_path, 'w') as f:
         json.dump(ordered, f, ensure_ascii=False, indent=1)

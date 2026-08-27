@@ -1,4 +1,4 @@
-import type { MunicipalityInfo, ScaleInfo, HeightInfo } from '../types';
+import type { MunicipalityInfo, ScaleInfo } from '../types';
 
 // 東部（鳥取市・岩美郡・八頭郡）
 export const TOBU: MunicipalityInfo[] = [
@@ -40,15 +40,8 @@ export const SCALES: ScaleInfo[] = [
 
 export const DEFAULT_SCALE = '300k';
 
-// 高さ（Z 方向）の倍率＝実寸に対する倍率（scripts/scales.py と対応）。
+// 高さ（Z 方向）は実寸の 3 倍（scripts/scales.py の Z_SCALE）。
 // 地形の起伏だけに掛かり、ベース厚さ 3mm には掛からない。
-// 枠は境界データだけから作るため高さ倍率の影響を受けず、全モードで共通。
-export const HEIGHTS: HeightInfo[] = [
-  { key: 'z15', label: '1.5 倍', note: '標準' },
-  { key: 'z20', label: '2 倍',   note: '強調' },
-  { key: 'z30', label: '3 倍',   note: '最大' },
-];
-
-export const DEFAULT_HEIGHT = 'z15';
+export const Z_SCALE_LABEL = '実寸の 3 倍';
 
 export const BASE_PATH = process.env.NODE_ENV === 'production' ? '/tottori-puzzle' : '';
