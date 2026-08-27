@@ -76,8 +76,12 @@ MUNICIPALITY_PARAMS = {
 }
 
 # ── まとめたピースの境界溝 ────────────────────────────────────────────────
-GROOVE_WIDTH_MM = 1.0   # 溝の幅 (mm)
-GROOVE_DEPTH_MM = 0.8   # 溝の深さ (mm)
+GROOVE_WIDTH_MM = 0.5   # 溝の幅 (mm)
+GROOVE_DEPTH_MM = 1.5   # 溝の深さ (mm)
+# 溝はベースを掘り込む形にする（ベースを厚くするとそのピースだけ枠から
+# 高く飛び出してしまうため）。溝の底には BASE_THICK - GROOVE_DEPTH_MM の
+# 肉厚が残るので、深さは BASE_THICK 未満にすること。
+assert GROOVE_DEPTH_MM < BASE_THICK, 'GROOVE_DEPTH_MM は BASE_THICK 未満にすること'
 
 # ── 彫刻設定 ──────────────────────────────────────────────────────────────
 ENGRAVE_DEPTH   = 1.5   # 彫り深さ (mm)
@@ -517,14 +521,22 @@ def _nbr(mask, di, dj):
 
 
 # ── 地形メッシュ ──────────────────────────────────────────────────────────
-def build_terrain(bbox, values, dec):
+def compute_base_z(bbox, values):
+    """ベース底面の z。海面 (0) と最低標高のうち低い方から BASE_THICK 下げる。
+
+    溝を彫ったグリッドではなく元のグリッドから求めること。そうしないと
+    溝の分だけベースが厚くなり、そのピースだけ枠から高く飛び出してしまう。
+    """
+    _, _, wz = world_grid(bbox, values)
+    valid_z = wz[~np.isnan(wz)]
+    min_valid_z = float(valid_z.min()) if len(valid_z) else 0.0
+    return min(min_valid_z, 0.0) - BASE_THICK
+
+
+def build_terrain(bbox, values, dec, base_z):
     wx, wy, wz = world_grid(bbox, values)
     sea_z = np.float32(0.0)
     wz_f = np.where(np.isnan(wz), sea_z, wz).astype(np.float32)
-
-    valid_z = wz_f[~np.isnan(wz)]
-    min_valid_z = float(valid_z.min()) if len(valid_z) else 0.0
-    base_z = min(min_valid_z, 0.0) - BASE_THICK
 
     R, C, R2, C2, m = cell_grid(values, dec)
     R=R[m]; C=C[m]; R2=R2[m]; C2=C2[m]
@@ -535,7 +547,7 @@ def build_terrain(bbox, values, dec):
     # 上面なので +Z 向き（反時計回り）になる巻き順にする
     t1 = make_tris(A, B, C_)
     t2 = make_tris(B, D, C_)
-    return np.concatenate([t1, t2]), base_z
+    return np.concatenate([t1, t2])
 
 # ── 壁メッシュ ────────────────────────────────────────────────────────────
 def _wall_quads(x1, y1, z1, x2, y2, z2, bz):
@@ -781,7 +793,10 @@ def gen_one(code, base_dir, dec, scale_key, height_keys):
         out_dir  = os.path.join(base_dir, 'public', 'data', 'stl', scale_key, hk)
         out_path = os.path.join(out_dir, f'{code}.stl')
 
-        terrain_tris, base_z = build_terrain(grid_bbox, grid, dec)
+        # ベースの厚さは溝の有無によらず一定にしたいので、溝を彫る前の
+        # グリッドから base_z を決める（＝溝はベースを掘り込む）
+        base_z = compute_base_z(grid_bbox, clipped)
+        terrain_tris = build_terrain(grid_bbox, grid, dec, base_z)
         wall_tris     = build_walls(grid_bbox, grid, base_z, dec)
         bot_tris      = build_bottom(grid_bbox, grid, base_z, dec, text_mask_pooled)
         txt_wall_tris = build_text_walls(grid_bbox, grid, base_z, dec, text_mask_pooled)
