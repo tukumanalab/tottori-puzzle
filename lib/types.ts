@@ -8,6 +8,10 @@ export interface ScaleInfo {
   key: string; label: string; note: string;
 }
 
+export interface HeightInfo {
+  key: string; label: string; note: string;
+}
+
 export interface PieceInfo {
   code: string; name: string;
   w: number; h: number; z: number; tri: number; mb: number;
@@ -24,5 +28,6 @@ export interface FrameScale {
   sections: FrameSection[];
 }
 
-export type PieceManifest = Record<string, Record<string, PieceInfo>>;
+// 縮尺キー → 高さ倍率キー → 市町村コード
+export type PieceManifest = Record<string, Record<string, Record<string, PieceInfo>>>;
 export type FrameManifest = Record<string, FrameScale>;
