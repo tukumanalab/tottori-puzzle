@@ -1,4 +1,5 @@
 export interface MunicipalityInfo {
+  no: number;   // 1〜19 の通し番号（全国地方公共団体コード順）
   code: string; name: string; nameEn: string; color: string;
 }
 

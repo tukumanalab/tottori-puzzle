@@ -19,6 +19,9 @@ const README_TXT = (scaleLabel: string) =>
   '本データは上記データを加工して作成したものです。\n';
 
 const mm = (v: number) => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
+const no2 = (n: number) => String(n).padStart(2, '0');
+const pieceFileName = (m: MunicipalityInfo, scale: string) =>
+  `${no2(m.no)}_${m.code}_${m.nameEn}_${scale}.stl`;
 
 export default function HomePage() {
   const [scale, setScale] = useState(DEFAULT_SCALE);
@@ -63,7 +66,7 @@ export default function HomePage() {
       const targets = municipalities.filter(m => !excluded.has(m.code));
       await Promise.all(targets.map(async (m) => {
         const resp = await fetch(stlUrl(`${m.code}.stl`));
-        if (resp.ok) zip.file(`${m.code}_${m.nameEn}.stl`, await resp.arrayBuffer());
+        if (resp.ok) zip.file(pieceFileName(m, scale), await resp.arrayBuffer());
       }));
       zip.file('README.txt', README_TXT(scaleInfo.label));
       const blob = await zip.generateAsync({ type: 'blob' });
@@ -124,6 +127,11 @@ export default function HomePage() {
             同じように嵌まり、同じ読みやすさになります。<br />
             地形の起伏は{Z_SCALE_LABEL}に強調しています（起伏だけに掛かり、ベース厚さには掛かりません）。
           </p>
+          <p className="text-xs text-gray-500">
+            市町村名の左の数字は 1〜19 の通し番号です。全国地方公共団体コード順
+            （市 4 つ → 岩美郡 → 八頭郡 → 東伯郡 → 西伯郡 → 日野郡）で振っていて、
+            ダウンロードするファイル名の先頭にも付きます（例: <code className="text-gray-400">01_31201_Tottori_300k.stl</code>）。
+          </p>
         </section>
 
 
@@ -155,22 +163,28 @@ export default function HomePage() {
                   {group.municipalities.map((m) => {
                     const info = pieceInfo[m.code];
                     return (
-                      <li key={m.code} className="flex items-center justify-between py-4 gap-4">
-                        <div className="flex items-center gap-3 min-w-0">
+                      <li key={m.code} className="flex items-center justify-between py-4 gap-3">
+                        <div className="flex items-center gap-2.5 min-w-0">
                           <input
                             type="checkbox"
                             checked={!excluded.has(m.code)}
                             onChange={() => toggleExclude(m.code)}
                             className="w-4 h-4 flex-shrink-0 accent-emerald-500 cursor-pointer"
                           />
+                          <span
+                            className="text-xs tabular-nums text-gray-500 w-5 text-right flex-shrink-0"
+                            title={`通し番号 ${m.no} / 全国地方公共団体コード ${m.code}`}
+                          >
+                            {m.no}
+                          </span>
                           <span className="w-1 h-8 rounded-full flex-shrink-0" style={{ background: m.color }} />
                           <div className={`min-w-0 ${excluded.has(m.code) ? 'opacity-40' : ''}`}>
-                            <div>
+                            <div className="flex items-baseline gap-2">
                               <span className="font-semibold">{m.name}</span>
-                              <span className="ml-2 text-gray-500 text-sm">{m.nameEn}</span>
+                              <span className="text-gray-500 text-sm">{m.nameEn}</span>
                             </div>
                             {info && (
-                              <div className="text-xs text-gray-600">
+                              <div className="text-xs text-gray-600 whitespace-nowrap">
                                 {mm(info.w)} × {mm(info.h)} mm・全高 {info.z.toFixed(1)} mm
                                 <span className="text-gray-700">（うち起伏 {(info.z - 3).toFixed(1)} mm）</span>
                               </div>
@@ -179,14 +193,14 @@ export default function HomePage() {
                         </div>
                         <div className="flex items-center gap-4 flex-shrink-0">
                           <button
-                            onClick={() => setPreview({ path: `${m.code}.stl`, name: m.name, color: m.color })}
+                            onClick={() => setPreview({ path: `${m.code}.stl`, name: `${m.no}. ${m.name}`, color: m.color })}
                             className="text-sm text-gray-500 hover:text-gray-200 transition-colors"
                           >
                             プレビュー
                           </button>
                           <a
                             href={stlUrl(`${m.code}.stl`)}
-                            download={`${m.code}_${m.nameEn}_${scale}.stl`}
+                            download={pieceFileName(m, scale)}
                             className="bg-blue-600 hover:bg-blue-500 transition-colors px-3 py-1.5 rounded text-sm font-medium"
                           >
                             ダウンロード
